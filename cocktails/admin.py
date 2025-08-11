@@ -28,20 +28,6 @@ def _get_model(name: str):
     except LookupError:
         return None
 
-def _cloudinary_square(url: str, size: int = 400) -> str:
-    """
-    Insert a Cloudinary transform to deliver a square image without re-uploading.
-    Example:
-      .../upload/v123/foo.jpg -> .../upload/c_fill,ar_1:1,g_auto,q_auto,f_auto,w_400/v123/foo.jpg
-    """
-    if not url or "/upload/" not in url:
-        return url or ""
-    return url.replace(
-        "/upload/",
-        f"/upload/c_fill,ar_1:1,g_auto,q_auto,f_auto,w_{size}/",
-        1,
-    )
-
 
 # ---------- inlines ----------
 
@@ -75,7 +61,7 @@ class CocktailAdmin(admin.ModelAdmin):
     def get_list_display(self, request):
         candidates = ["id", "name", "status", "cocktail_abv", "cocktail_price", "created_at", "updated_at"]
         cols = [c for c in candidates if _has_field(Cocktail, c)]
-        # small square thumbnail column
+        # small thumb column (CSS only, no transform)
         if "name" in cols:
             cols.insert(1, "thumb")
         else:
@@ -86,9 +72,9 @@ class CocktailAdmin(admin.ModelAdmin):
         url = getattr(obj, "image_url", None) or getattr(obj, "photo_url", None)
         if not url:
             return "—"
-        sq = _cloudinary_square(url, size=120)
+        # square display via CSS object-fit, using your stored (already-square) URL
         return format_html(
-            '<img src="{}" style="height:28px;width:28px;object-fit:cover;border-radius:4px;" />', sq
+            '<img src="{}" style="height:28px;width:28px;object-fit:cover;border-radius:4px;" />', url
         )
     thumb.short_description = " "
 
@@ -100,8 +86,7 @@ class CocktailAdmin(admin.ModelAdmin):
     def image_preview(self, obj):
         url = getattr(obj, "image_url", None) or getattr(obj, "photo_url", None)
         if url:
-            sq = _cloudinary_square(url, size=400)
-            return format_html('<img src="{}" style="max-width:240px;height:auto;border-radius:8px;" />', sq)
+            return format_html('<img src="{}" style="max-width:240px;height:auto;border-radius:8px;" />', url)
         return "—"
     image_preview.short_description = "Preview"
 
