@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Django
+*.log
+db.sqlite3
+*.sqlite3
+local_settings.py
+staticfiles/
+static/
+media/
+.env
+.env.*.local
+.env.local
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Editors/OS
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Project-specific
+MasterPictures/        # we use Cloudinary; keep out of git
+certs/
+.secrets/

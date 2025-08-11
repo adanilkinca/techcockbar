@@ -1,0 +1,9 @@
+Python 3.13
+Django (see requirements.txt)
+MySQL (DATABASE_URL), Cloudinary (CLOUDINARY_URL)
+
+
+### `requirements.txt` (commit it)
+From your activated venv:
+```powershell
+pip freeze > requirements.txt
