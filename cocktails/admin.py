@@ -19,6 +19,74 @@ from .models import (
     CocktailSummary,
 )
 
+from decimal import Decimal, ROUND_HALF_UP
+
+# --- units -> ounces
+UNIT_TO_OZ = {
+    "oz": Decimal("1"),
+    "ml": Decimal("0.0333333333"),  # 1 ml ≈ 1/30 oz
+    "dash": Decimal("0.03"),
+    "leaf": Decimal("0"),
+    "wedge": Decimal("0"),
+}
+
+def _dec(x, default="0"):
+    if x is None:
+        return Decimal(default)
+    try:
+        return Decimal(str(x))
+    except Exception:
+        return Decimal(default)
+
+def _get_pricing_settings():
+    # Robust against field name drift
+    from .models import PricingSettings
+    try:
+        return PricingSettings.objects.first()
+    except Exception:
+        return None
+
+def _labor_cost(ps):
+    for name in ("labor_cost_per_cocktail", "labor_per_cocktail", "labor_cost", "labor"):
+        if ps and hasattr(ps, name):
+            val = getattr(ps, name)
+            if val is not None:
+                return _dec(val, "0")
+    return Decimal("0")
+
+def _markup_multiplier(ps):
+    if not ps:
+        return Decimal("1")
+    # use explicit multiplier if present
+    if hasattr(ps, "markup_multiplier") and ps.markup_multiplier is not None:
+        return _dec(ps.markup_multiplier, "1")
+    # otherwise accept fraction/percent style fields
+    raw = None
+    for name in ("default_markup", "markup", "markup_percent"):
+        if hasattr(ps, name):
+            raw = getattr(ps, name)
+            if raw is not None:
+                break
+    m = _dec(raw, "0")
+    # if 20 -> 20% -> 0.20
+    if m > 1 and m > Decimal("2"):
+        m = m / Decimal("100")
+    return Decimal("1") + m
+
+def _amount_oz(ci):
+    """
+    Prefer ci.amount_oz if you already store it; otherwise compute from
+    amount_input * unit_input.
+    """
+    amt_oz = _dec(getattr(ci, "amount_oz", None), None)
+    if amt_oz is not None:
+        return amt_oz
+    amt_in = _dec(getattr(ci, "amount_input", None), "0")
+    unit = (getattr(ci, "unit_input", "") or "oz").strip().lower()
+    factor = UNIT_TO_OZ.get(unit, Decimal("1"))
+    return (amt_in * factor)
+
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -206,11 +274,41 @@ class CocktailIngredientInline(admin.TabularInline):
 # ----------------------------
 
 class CocktailAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "status", "price_auto_safe", "cocktail_abv_safe", "image_thumb")
+    list_display = ("id", "name", "status", "price_calc", "price_auto_safe", "cocktail_abv_safe", "image_thumb")
     list_filter = ("status",)
     search_fields = ("name",)
     inlines = [CocktailIngredientInline]
     readonly_fields = ("image_preview", "created_at_safe", "updated_at_safe")
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.prefetch_related("cocktailingredient_set__ingredient")
+
+    def price_calc(self, obj):
+        """
+        Price = (Σ(amount_oz * ingredient.cost_per_oz) + labor) * markup
+        Uses PricingSettings if present; otherwise shows raw sum.
+        """
+        total = Decimal("0")
+        # iterate through the through-model rows
+        for ci in getattr(obj, "cocktailingredient_set", []).all():
+            ing = getattr(ci, "ingredient", None)
+            if not ing:
+                continue
+            amt_oz = _amount_oz(ci)
+            cpo = _dec(getattr(ing, "cost_per_oz", None), "0")
+            total += (amt_oz * cpo)
+
+        ps = _get_pricing_settings()
+        price = (total + _labor_cost(ps)) * _markup_multiplier(ps)
+
+        if price <= 0:
+            # keep the admin's "—"
+            return self.admin_site.empty_value_display
+        return f"{price.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+
+    price_calc.short_description = "Price"
+        
 
     # Prepopulate slug if the field exists
     def get_prepopulated_fields(self, request, obj=None):
