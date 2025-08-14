@@ -13,6 +13,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import pymysql
+pymysql.install_as_MySQLdb()
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -91,6 +94,11 @@ DATABASES = {
     }
 }
 
+# Add SSL CA for TiDB (only when provided)
+ca_path = os.path.join(BASE_DIR, os.getenv("TIDB_SSL_CA", ""))
+if ca_path and os.path.exists(ca_path):
+    DATABASES["default"].setdefault("OPTIONS", {})
+    DATABASES["default"]["OPTIONS"]["ssl"] = {"ca": ca_path}
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

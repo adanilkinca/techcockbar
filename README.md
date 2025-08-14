@@ -2,14 +2,30 @@
 
 Django project for cocktail recipes.
 
-## Quickstart
-```bash
-python -m venv .venv
-. .venv/Scripts/activate      # Windows PowerShell
+## Quickstart (Windows PowerShell)
+
+```powershell
+cd "E:\ShakeThat!\Website\techcockbar"
+
+# Create & activate venv once
+py -m venv .venv
+.\.venv\Scripts\activate
+
+# Install deps
+pip install --upgrade pip
 pip install -r requirements.txt
-copy .env.example .env        # then edit .env with real values
+
+# Create your local .env based on .env.example and fill TiDB password
+copy .env.example .env
+notepad .env
+
+# Run DB migrations & start
 python manage.py migrate
-python manage.py createsuperuser
 python manage.py runserver
+
+
+# (optional: if didn't already, before to start server): 
+python manage.py createsuperuser
+
 
 
