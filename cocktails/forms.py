@@ -1,85 +1,119 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from django import forms
-from .models import Cocktail, CocktailIngredient, Ingredient
+from django.apps import apps
 
-# ===== Admin UI choices =====
-UNIT_CHOICES = [("oz", "oz"), ("leaf", "leaf"), ("wedge", "wedge"), ("dash", "dash")]
+# -----------------------------
+# Shared helpers
+# -----------------------------
 
-INGREDIENT_TYPE_CHOICES = [
-    ("Spirits", "Spirits"),
-    ("Homemade", "Homemade"),
-    ("Vermouth", "Vermouth"),
-    ("Liqueurs", "Liqueurs"),
-    ("Wines", "Wines"),
-    ("Beer and cider", "Beer and cider"),
-    ("Bitters", "Bitters"),
-    ("Syrups", "Syrups"),
-    ("Juices", "Juices"),
-    ("Water and soft drinks", "Water and soft drinks"),
-    ("Tea and coffee", "Tea and coffee"),
-    ("Dairy", "Dairy"),
-    ("Seafood", "Seafood"),
-    ("Puree", "Puree"),
-    ("Fruits", "Fruits"),
-    ("Berries", "Berries"),
-    ("Vegetables", "Vegetables"),
-    ("Plants", "Plants"),
-    ("Honey and jams", "Honey and jams"),
-    ("Sauces and oil", "Sauces and oil"),
-    ("Spices", "Spices"),
-    ("Nuts and Sweet", "Nuts and Sweet"),
-]
+UNIT_CHOICES = (
+    ("oz", "oz"),
+    ("leaf", "leaf"),
+    ("wedge", "wedge"),
+    ("dash", "dash"),
+)
 
-def _has_field(model, name: str) -> bool:
-    return any(getattr(f, "concrete", False) and f.name == name for f in model._meta.get_fields())
+INGREDIENT_TYPE_CHOICES = (
+    ("spirit", "Spirits"),
+    ("homemade", "Homemade"),
+    ("vermouth", "Vermouth"),
+    ("liqueur", "Liqueurs"),
+    ("wine", "Wines"),
+    ("beer", "Beer and cider"),
+    ("bitters", "Bitters"),
+    ("syrup", "Syrups"),
+    ("juice", "Juices"),
+    ("soft_drink", "Water and soft drinks"),
+    ("tea_coffee", "Tea and coffee"),
+    ("dairy", "Dairy"),
+    ("seafood", "Seafood"),
+    ("puree", "Puree"),
+    ("fruit", "Fruits"),
+    ("berry", "Berries"),
+    ("vegetable", "Vegetables"),
+    ("plant", "Plants"),
+    ("honey_jam", "Honey and jams"),
+    ("sauce_oil", "Sauces and oil"),
+    ("spice", "Spices"),
+    ("nuts_sweet", "Nuts and Sweet"),
+)
 
-# ===== Cocktail inline (unchanged from earlier answer) =====
-class CocktailIngredientInlineForm(forms.ModelForm):
-    unit_input = forms.ChoiceField(choices=UNIT_CHOICES, initial="oz")
+def _quantize_money(x: Decimal) -> Decimal:
+    if x is None:
+        return Decimal("0.00")
+    return x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+def compute_cocktail_cost(cocktail) -> Decimal:
+    """
+    Compute cost defensively: never rely on a particular related_name.
+    """
+    CocktailIngredient = apps.get_model("cocktails", "CocktailIngredient")
+    PricingSettings = apps.get_model("cocktails", "PricingSettings")
+
+    total = Decimal("0")
+    rows = (
+        CocktailIngredient.objects
+        .filter(cocktail=cocktail)
+        .select_related("ingredient")
+        .only("amount_oz", "ingredient__cost_per_oz")
+    )
+    for r in rows:
+        amt = r.amount_oz or Decimal("0")
+        cpo = r.ingredient.cost_per_oz if r.ingredient else Decimal("0")
+        total += (amt * cpo)
+
+    ps = PricingSettings.objects.first()
+    if ps is not None:
+        labor = getattr(ps, "labor_cost_per_cocktail", None)
+        if labor is None:
+            labor = getattr(ps, "labor_per_cocktail", None)
+        if labor:
+            total += Decimal(labor)
+
+    return _quantize_money(total)
+
+
+# -----------------------------
+# Forms
+# -----------------------------
+
+class IngredientAdminForm(forms.ModelForm):
+    type = forms.ChoiceField(
+        choices=(("", "—"),) + INGREDIENT_TYPE_CHOICES,
+        required=False,
+    )
 
     class Meta:
-        model = CocktailIngredient
+        model = apps.get_model("cocktails", "Ingredient")
         fields = "__all__"
 
-    def save(self, commit=True):
-        inst = super().save(commit=False)
-        try:
-            amt = self.cleaned_data.get("amount_input")
-            unit = self.cleaned_data.get("unit_input") or getattr(inst, "unit_input", None)
-            if amt is not None and hasattr(inst, "amount_oz"):
-                if unit == "oz":
-                    inst.amount_oz = amt
-                elif unit == "dash":
-                    inst.amount_oz = (amt or Decimal("0")) * Decimal("0.03")
-                else:
-                    inst.amount_oz = Decimal("0")
-        except Exception:
-            pass
-        if commit:
-            inst.save()
-        return inst
+
+class CocktailIngredientInlineForm(forms.ModelForm):
+    unit_input = forms.ChoiceField(choices=UNIT_CHOICES, required=False)
+
+    class Meta:
+        model = apps.get_model("cocktails", "CocktailIngredient")
+        fields = "__all__"
+
 
 class CocktailAdminForm(forms.ModelForm):
+    price_auto_display = forms.DecimalField(
+        label="Price (auto)",
+        required=False,
+        disabled=True,
+        decimal_places=2,
+        max_digits=10,
+        help_text="Calculated from ingredients + labor (read-only).",
+    )
+
     class Meta:
-        model = Cocktail
+        model = apps.get_model("cocktails", "Cocktail")
         fields = "__all__"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if "glass_type" in self.fields:
-            # (optional nice dropdown if you added choices on the model)
-            self.fields["glass_type"].required = False
-
-# ===== Ingredient form (NEW) =====
-class IngredientAdminForm(forms.ModelForm):
-    """
-    - Forces 'type' to be a dropdown with your fixed categories.
-    - Exposes 'image_url' as a normal URL field (you'll add it on the model below).
-    """
-    # render 'type' as dropdown (even if the model is just a CharField)
-    if _has_field(Ingredient, "type"):
-        type = forms.ChoiceField(choices=INGREDIENT_TYPE_CHOICES, required=False)
-
-    class Meta:
-        model = Ingredient
-        fields = "__all__"
+        instance = kwargs.get("instance")
+        if instance and instance.pk:
+            self.fields["price_auto_display"].initial = compute_cocktail_cost(instance)
+        else:
+            self.fields["price_auto_display"].initial = Decimal("0.00")
