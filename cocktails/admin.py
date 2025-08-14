@@ -19,6 +19,7 @@ from .models import (
     CocktailSummary,
 )
 
+from django.apps import apps
 from decimal import Decimal, ROUND_HALF_UP
 
 # --- units -> ounces
@@ -39,7 +40,6 @@ def _dec(x, default="0"):
         return Decimal(default)
 
 def _get_pricing_settings():
-    # Robust against field name drift
     from .models import PricingSettings
     try:
         return PricingSettings.objects.first()
@@ -57,10 +57,8 @@ def _labor_cost(ps):
 def _markup_multiplier(ps):
     if not ps:
         return Decimal("1")
-    # use explicit multiplier if present
     if hasattr(ps, "markup_multiplier") and ps.markup_multiplier is not None:
         return _dec(ps.markup_multiplier, "1")
-    # otherwise accept fraction/percent style fields
     raw = None
     for name in ("default_markup", "markup", "markup_percent"):
         if hasattr(ps, name):
@@ -68,16 +66,12 @@ def _markup_multiplier(ps):
             if raw is not None:
                 break
     m = _dec(raw, "0")
-    # if 20 -> 20% -> 0.20
     if m > 1 and m > Decimal("2"):
         m = m / Decimal("100")
     return Decimal("1") + m
 
 def _amount_oz(ci):
-    """
-    Prefer ci.amount_oz if you already store it; otherwise compute from
-    amount_input * unit_input.
-    """
+    """Prefer ci.amount_oz if present; else amount_input * unit_input."""
     amt_oz = _dec(getattr(ci, "amount_oz", None), None)
     if amt_oz is not None:
         return amt_oz
@@ -85,6 +79,18 @@ def _amount_oz(ci):
     unit = (getattr(ci, "unit_input", "") or "oz").strip().lower()
     factor = UNIT_TO_OZ.get(unit, Decimal("1"))
     return (amt_in * factor)
+
+# ---- Discover reverse accessor Cocktail -> CocktailIngredient dynamically
+def _discover_ci_accessor():
+    try:
+        Through = apps.get_model("cocktails", "CocktailIngredient")
+        fk = Through._meta.get_field("cocktail")
+        return fk.remote_field.get_accessor_name()   # e.g., "cocktailingredient_set" or custom related_name
+    except Exception:
+        return None
+
+_CI_ACCESSOR = _discover_ci_accessor()
+
 
 
 # ----------------------------
@@ -282,16 +288,30 @@ class CocktailAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        return qs.prefetch_related("cocktailingredient_set__ingredient")
+        if _CI_ACCESSOR:
+            # prefetch through rows and their ingredient in one go
+            return qs.prefetch_related(f"{_CI_ACCESSOR}__ingredient")
+        return qs
 
     def price_calc(self, obj):
         """
         Price = (Σ(amount_oz * ingredient.cost_per_oz) + labor) * markup
-        Uses PricingSettings if present; otherwise shows raw sum.
+        Falls back gracefully if something is missing.
         """
         total = Decimal("0")
-        # iterate through the through-model rows
-        for ci in getattr(obj, "cocktailingredient_set", []).all():
+
+        # Get the through rows from whatever the reverse accessor actually is
+        rows = []
+        if _CI_ACCESSOR and hasattr(obj, _CI_ACCESSOR):
+            rows = getattr(obj, _CI_ACCESSOR).all()
+        else:
+            # last-resort common guesses
+            for guess in ("cocktailingredient_set", "ci_rows", "rows"):
+                if hasattr(obj, guess):
+                    rows = getattr(obj, guess).all()
+                    break
+
+        for ci in rows:
             ing = getattr(ci, "ingredient", None)
             if not ing:
                 continue
@@ -303,11 +323,11 @@ class CocktailAdmin(admin.ModelAdmin):
         price = (total + _labor_cost(ps)) * _markup_multiplier(ps)
 
         if price <= 0:
-            # keep the admin's "—"
             return self.admin_site.empty_value_display
         return f"{price.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
 
     price_calc.short_description = "Price"
+
         
 
     # Prepopulate slug if the field exists
