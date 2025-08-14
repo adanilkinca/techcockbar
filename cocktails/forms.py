@@ -1,23 +1,40 @@
 from decimal import Decimal
 from django import forms
-from .models import Cocktail, CocktailIngredient
+from .models import Cocktail, CocktailIngredient, Ingredient
 
-# Admin UI choices
+# ===== Admin UI choices =====
 UNIT_CHOICES = [("oz", "oz"), ("leaf", "leaf"), ("wedge", "wedge"), ("dash", "dash")]
 
-GLASS_CHOICES = [
-    ("Shot", "Shot"), ("Hurricane", "Hurricane"), ("Sling", "Sling"), ("Rocks", "Rocks"),
-    ("Highball", "Highball"), ("Goblet", "Goblet"), ("Cognac", "Cognac"), ("Pint", "Pint"),
-    ("Collins", "Collins"), ("Cocktail", "Cocktail"), ("Red wine", "Red wine"),
-    ("Margarita", "Margarita"), ("Irish coffee", "Irish coffee"),
-    ("Milkshake", "Milkshake"), ("Tiki mug", "Tiki mug"), ("Jar", "Jar"),
+INGREDIENT_TYPE_CHOICES = [
+    ("Spirits", "Spirits"),
+    ("Homemade", "Homemade"),
+    ("Vermouth", "Vermouth"),
+    ("Liqueurs", "Liqueurs"),
+    ("Wines", "Wines"),
+    ("Beer and cider", "Beer and cider"),
+    ("Bitters", "Bitters"),
+    ("Syrups", "Syrups"),
+    ("Juices", "Juices"),
+    ("Water and soft drinks", "Water and soft drinks"),
+    ("Tea and coffee", "Tea and coffee"),
+    ("Dairy", "Dairy"),
+    ("Seafood", "Seafood"),
+    ("Puree", "Puree"),
+    ("Fruits", "Fruits"),
+    ("Berries", "Berries"),
+    ("Vegetables", "Vegetables"),
+    ("Plants", "Plants"),
+    ("Honey and jams", "Honey and jams"),
+    ("Sauces and oil", "Sauces and oil"),
+    ("Spices", "Spices"),
+    ("Nuts and Sweet", "Nuts and Sweet"),
 ]
 
 def _has_field(model, name: str) -> bool:
     return any(getattr(f, "concrete", False) and f.name == name for f in model._meta.get_fields())
 
+# ===== Cocktail inline (unchanged from earlier answer) =====
 class CocktailIngredientInlineForm(forms.ModelForm):
-    # Force the CharField to be one of the allowed units (your DB FK targets units.name)
     unit_input = forms.ChoiceField(choices=UNIT_CHOICES, initial="oz")
 
     class Meta:
@@ -25,40 +42,24 @@ class CocktailIngredientInlineForm(forms.ModelForm):
         fields = "__all__"
 
     def save(self, commit=True):
-        """
-        If the through model has an 'amount_oz' field, keep it in sync with
-        amount_input + unit_input. We assume:
-          - oz   => 1.0
-          - dash => 0.03 oz
-          - leaf/wedge => non-fluid (store 0.0 oz)
-        """
         inst = super().save(commit=False)
-
         try:
             amt = self.cleaned_data.get("amount_input")
             unit = self.cleaned_data.get("unit_input") or getattr(inst, "unit_input", None)
-
             if amt is not None and hasattr(inst, "amount_oz"):
                 if unit == "oz":
                     inst.amount_oz = amt
                 elif unit == "dash":
                     inst.amount_oz = (amt or Decimal("0")) * Decimal("0.03")
-                else:  # leaf / wedge / anything non-fluid
+                else:
                     inst.amount_oz = Decimal("0")
         except Exception:
-            # never block admin save on a conversion hiccup
             pass
-
         if commit:
             inst.save()
         return inst
 
-
 class CocktailAdminForm(forms.ModelForm):
-    """
-    Uses a curated dropdown for glass type *if* that field exists.
-    (If your model doesn’t have 'glass_type', nothing special happens.)
-    """
     class Meta:
         model = Cocktail
         fields = "__all__"
@@ -66,8 +67,19 @@ class CocktailAdminForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if "glass_type" in self.fields:
-            self.fields["glass_type"] = forms.ChoiceField(
-                choices=GLASS_CHOICES,
-                initial=getattr(self.instance, "glass_type", None),
-                required=False,
-            )
+            # (optional nice dropdown if you added choices on the model)
+            self.fields["glass_type"].required = False
+
+# ===== Ingredient form (NEW) =====
+class IngredientAdminForm(forms.ModelForm):
+    """
+    - Forces 'type' to be a dropdown with your fixed categories.
+    - Exposes 'image_url' as a normal URL field (you'll add it on the model below).
+    """
+    # render 'type' as dropdown (even if the model is just a CharField)
+    if _has_field(Ingredient, "type"):
+        type = forms.ChoiceField(choices=INGREDIENT_TYPE_CHOICES, required=False)
+
+    class Meta:
+        model = Ingredient
+        fields = "__all__"

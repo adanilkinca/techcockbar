@@ -10,18 +10,22 @@ class Tag(models.Model):
         db_table = "tags"
     def __str__(self): return self.name
 
+# cocktails/models.py (Ingredient excerpt)
 class Ingredient(models.Model):
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255, unique=True)
-    type = models.CharField(max_length=64, null=True, blank=True)
-    abv_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    type = models.CharField(max_length=64, null=True, blank=True)  # category
+    abv_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)  # e.g. 40.00
     cost_per_oz = models.DecimalField(max_digits=10, decimal_places=4, default=0)
     is_housemade = models.BooleanField(default=False)
     notes = models.TextField(null=True, blank=True)
+    image_url = models.URLField(blank=True, null=True)
     class Meta:
         managed = False
         db_table = "ingredients"
-    def __str__(self): return self.name
+    def __str__(self):
+        return self.name
+
 
 class Cocktail(models.Model):
     STATUS_CHOICES = (("draft","draft"),("published","published"),("archived","archived"))

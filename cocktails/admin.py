@@ -1,14 +1,15 @@
-# cocktails/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
 from django.apps import apps
 
 from .models import Cocktail, Ingredient, CocktailIngredient
-from .forms import CocktailIngredientInlineForm, CocktailAdminForm
-
+from .forms import (
+    CocktailIngredientInlineForm,
+    CocktailAdminForm,
+    IngredientAdminForm,
+)
 
 # ---------- helpers ----------
-
 def _has_field(model, name: str) -> bool:
     return any(getattr(f, "concrete", False) and f.name == name for f in model._meta.get_fields())
 
@@ -28,9 +29,7 @@ def _get_model(name: str):
     except LookupError:
         return None
 
-
-# ---------- inlines ----------
-
+# ---------- Cocktail inlines ----------
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
     form = CocktailIngredientInlineForm
@@ -49,9 +48,7 @@ class CocktailIngredientInline(admin.TabularInline):
     def get_ordering(self, request):
         return ("seq",) if _has_field(self.model, "seq") else None
 
-
-# ---------- main cocktail admin ----------
-
+# ---------- Cocktail admin ----------
 @admin.register(Cocktail)
 class CocktailAdmin(admin.ModelAdmin):
     form = CocktailAdminForm
@@ -61,7 +58,6 @@ class CocktailAdmin(admin.ModelAdmin):
     def get_list_display(self, request):
         candidates = ["id", "name", "status", "cocktail_abv", "cocktail_price", "created_at", "updated_at"]
         cols = [c for c in candidates if _has_field(Cocktail, c)]
-        # small thumb column (CSS only, no transform)
         if "name" in cols:
             cols.insert(1, "thumb")
         else:
@@ -72,7 +68,6 @@ class CocktailAdmin(admin.ModelAdmin):
         url = getattr(obj, "image_url", None) or getattr(obj, "photo_url", None)
         if not url:
             return "—"
-        # square display via CSS object-fit, using your stored (already-square) URL
         return format_html(
             '<img src="{}" style="height:28px;width:28px;object-fit:cover;border-radius:4px;" />', url
         )
@@ -90,62 +85,79 @@ class CocktailAdmin(admin.ModelAdmin):
         return "—"
     image_preview.short_description = "Preview"
 
-
-# ---------- Ingredient admin ----------
-
+# ---------- Ingredient admin (NEW) ----------
 @admin.register(Ingredient)
 class IngredientAdmin(admin.ModelAdmin):
+    form = IngredientAdminForm
     search_fields = ("name",)
-    list_display = tuple([c for c in ("id", "name", "abv") if _has_field(Ingredient, c)])
+    list_filter = tuple([x for x in ("type",) if _has_field(Ingredient, x)])
 
+    def get_list_display(self, request):
+        columns = ["id", "name"]
+        if _has_field(Ingredient, "type"): columns.append("type")
+        if _has_field(Ingredient, "abv"):  columns.append("abv")
+        columns.append("thumb")
+        return tuple(columns)
 
-# ---------- Read-only view models (if present) ----------
+    def get_fields(self, request, obj=None):
+        # Order the edit form fields nicely if they exist on the model
+        ordered = ["name", "type", "abv", "image_url", "image_preview"]
+        existing = [f for f in ordered if _has_field(Ingredient, f) or f == "image_preview"]
+        # + include any remaining unmanaged fields to avoid hiding something important
+        remaining = [f for f in _concrete_field_names(Ingredient, include_rel=False) if f not in existing]
+        return tuple(existing + remaining)
 
+    readonly_fields = ("image_preview",)
+
+    def image_preview(self, obj):
+        url = getattr(obj, "image_url", None) or getattr(obj, "photo_url", None)
+        if url:
+            return format_html('<img src="{}" style="max-width:200px;height:auto;border-radius:8px;" />', url)
+        return "—"
+    image_preview.short_description = "Preview"
+
+    def thumb(self, obj):
+        url = getattr(obj, "image_url", None) or getattr(obj, "photo_url", None)
+        if not url:
+            return "—"
+        return format_html(
+            '<img src="{}" style="height:28px;width:28px;object-fit:cover;border-radius:4px;" />', url
+        )
+    thumb.short_description = " "
+
+# ---------- Read-only view models ----------
 def _register_readonly(model):
     class ReadOnlyAdmin(admin.ModelAdmin):
         list_per_page = 50
-
         def get_list_display(self, request):
             return [f for f in _concrete_field_names(model, include_rel=False)]
-
         def get_readonly_fields(self, request, obj=None):
             return _concrete_field_names(model)
-
         def has_add_permission(self, request): return False
         def has_change_permission(self, request, obj=None): return False
         def has_delete_permission(self, request, obj=None): return False
-
-        def get_ordering(self, request):
-            return ("pk",)
-
+        def get_ordering(self, request): return ("pk",)
         search_fields = ("cocktail__name", "cocktail__id", "cocktail__slug")
-
     try:
         admin.site.register(model, ReadOnlyAdmin)
     except admin.sites.AlreadyRegistered:
         pass
 
-
 CocktailSummary   = _get_model("CocktailSummary")
 CocktailPrice     = _get_model("CocktailPrice")
 CocktailAllergens = _get_model("CocktailAllergens")
-
 for m in (CocktailSummary, CocktailPrice, CocktailAllergens):
     if m is not None:
         _register_readonly(m)
 
-
-# ---------- PricingSettings (editable knobs like labor cost) ----------
-
+# ---------- Pricing settings (if present) ----------
 PricingSettings = _get_model("PricingSettings")
 if PricingSettings is not None:
     class PricingSettingsAdmin(admin.ModelAdmin):
         def get_list_display(self, request):
             return tuple(_concrete_field_names(PricingSettings, include_rel=False))
-        def get_readonly_fields(self, request, obj=None):
-            return ()
+        def get_readonly_fields(self, request, obj=None): return ()
         list_per_page = 20
-
     try:
         admin.site.register(PricingSettings, PricingSettingsAdmin)
     except admin.sites.AlreadyRegistered:
