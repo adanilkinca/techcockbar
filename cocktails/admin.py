@@ -1,236 +1,221 @@
 from decimal import Decimal
+
+from django.conf import settings
 from django.contrib import admin
+from django.db import models
 from django.utils.html import format_html
-from django.apps import apps
 
 from .forms import (
-    IngredientAdminForm,
     CocktailIngredientInlineForm,
-    CocktailAdminForm,
-    compute_cocktail_cost,
+    IngredientAdminForm,
+)
+from .models import (
+    Cocktail,
+    CocktailIngredient,
+    Ingredient,
+    PricingSettings,
+    CocktailSummary,
 )
 
-# Models
-Cocktail = apps.get_model("cocktails", "Cocktail")
-Ingredient = apps.get_model("cocktails", "Ingredient")
-CocktailIngredient = apps.get_model("cocktails", "CocktailIngredient")
-PricingSettings = apps.get_model("cocktails", "PricingSettings")
-CocktailSummary = apps.get_model("cocktails", "CocktailSummary")
+# --- pricing helpers ---------------------------------------------------------
 
-# -------------------------------------------------
-# helpers
-# -------------------------------------------------
+# We rely on your small utils module for all math.
+# If names change in the future this won't crash admin.
+PRICE_FN = None
+ABV_FN = None
+try:
+    from utils.pricing import compute_cocktail_price, compute_cocktail_abv  # preferred names
 
-def cloudinary_thumb(url: str, size=64) -> str:
-    if not url or "res.cloudinary.com" not in url:
-        return url or ""
-    return url.replace("/upload/", f"/upload/c_fill,g_auto,h_{size},w_{size},q_auto,f_auto/", 1)
+    PRICE_FN = compute_cocktail_price
+    ABV_FN = compute_cocktail_abv
+except Exception:
+    try:
+        from utils.pricing import price_for_cocktail as PRICE_FN  # legacy name
+    except Exception:
+        PRICE_FN = None
+    try:
+        from utils.pricing import abv_for_cocktail as ABV_FN  # legacy name
+    except Exception:
+        ABV_FN = None
 
-# -------------------------------------------------
-# INLINES
-# -------------------------------------------------
+
+def safe_price(cocktail: Cocktail):
+    if PRICE_FN is None:
+        return None
+    try:
+        val = PRICE_FN(cocktail)
+        return Decimal(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def safe_abv(cocktail: Cocktail):
+    if ABV_FN is None:
+        return None
+    try:
+        val = ABV_FN(cocktail)
+        return Decimal(val) if val is not None else None
+    except Exception:
+        return None
+
+
+# --- inlines -----------------------------------------------------------------
 
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
     form = CocktailIngredientInlineForm
     extra = 0
-    fields = (
-        "seq",
-        "ingredient",
-        "amount_input",
-        "unit_input",
-        "amount_oz",
-        "prep_note",
-        "is_optional",
-    )
+    fields = ("seq", "ingredient", "amount_input", "unit_input", "amount_oz", "prep_note", "is_optional")
     readonly_fields = ("amount_oz",)
     ordering = ("seq",)
 
-# -------------------------------------------------
-# INGREDIENT ADMIN
-# -------------------------------------------------
+
+# --- mixins ------------------------------------------------------------------
+
+NO_IMAGE_URL = getattr(
+    settings,
+    "ADMIN_DEFAULT_IMAGE_URL",
+    "https://res.cloudinary.com/dau9qbp3l/image/upload/v1755145790/no-photo-master.png",
+)
+
+
+class PreviewMixin:
+    """Show a small preview in change form; in lists we keep '-' if empty."""
+
+    image_url_field_name = "image_url"
+
+    def _obj_image_url(self, obj):
+        url = getattr(obj, self.image_url_field_name, None)
+        return url or NO_IMAGE_URL
+
+    @admin.display(description="Preview")
+    def image_preview(self, obj):
+        url = self._obj_image_url(obj)
+        return format_html('<img src="{}" style="height:90px;border-radius:8px;">', url)
+
+    @admin.display(description="Image")
+    def image_thumb_or_dash(self, obj):
+        """Use dash in lists if there is no image_url (so you can see what’s missing)."""
+        url = getattr(obj, self.image_url_field_name, None)
+        if not url:
+            return "—"
+        return format_html('<img src="{}" style="height:24px;">', url)
+
+
+# --- Cocktail admin -----------------------------------------------------------
+
+@admin.register(Cocktail)
+class CocktailAdmin(PreviewMixin, admin.ModelAdmin):
+    list_display = ("name", "status", "price_list", "abv_list", "image_thumb_or_dash")
+    list_filter = ("status",)
+    search_fields = ("name", "slug")
+    readonly_fields = ("image_preview", "price_auto", "abv_auto", "created_at", "updated_at")
+    inlines = [CocktailIngredientInline]
+
+    fieldsets = (
+        (None, {"fields": ("name", "slug", "story_long")}),
+        ("Media", {"fields": ("image_url", "image_preview", "video_url")}),
+        ("Status & system", {"fields": ("status", "price_auto", "abv_auto", "created_at", "updated_at")}),
+    )
+
+    # --- readonly values in the form
+    @admin.display(description="Price (auto)")
+    def price_auto(self, obj):
+        val = safe_price(obj)
+        return f"{val:.2f}" if val is not None else "—"
+
+    @admin.display(description="ABV (auto)")
+    def abv_auto(self, obj):
+        val = safe_abv(obj)
+        return f"{val:.2f}" if val is not None else "—"
+
+    # --- columns in the list
+    @admin.display(description="Price")
+    def price_list(self, obj):
+        val = safe_price(obj)
+        return f"{val:.2f}" if val is not None else "—"
+
+    @admin.display(description="ABV %")
+    def abv_list(self, obj):
+        val = safe_abv(obj)
+        return f"{val:.2f}" if val is not None else "—"
+
+
+# --- Ingredient admin --------------------------------------------------------
 
 @admin.register(Ingredient)
-class IngredientAdmin(admin.ModelAdmin):
+class IngredientAdmin(PreviewMixin, admin.ModelAdmin):
     form = IngredientAdminForm
-
-    list_display = (
-        "id",
-        "name",
-        "type",
-        "abv_percent",
-        "cost_per_oz",
-        "is_housemade",
-        "image_col",
-    )
+    list_display = ("id", "name", "type", "abv_percent", "cost_per_oz", "is_housemade", "image_thumb_or_dash")
     list_filter = ("type", "is_housemade")
     search_fields = ("name",)
     readonly_fields = ("image_preview",)
+    fields = ("name", "type", "abv_percent", "cost_per_oz", "is_housemade", "notes", "image_url", "image_preview")
 
-    fieldsets = (
-        (None, {
-            "fields": ("name", "type", "abv_percent", "cost_per_oz", "is_housemade", "notes"),
-        }),
-        ("Media", {
-            "fields": ("image_url", "image_preview"),
-        }),
-    )
 
-    def image_col(self, obj):
-        if not obj.image_url:
-            return "—"
-        return format_html(
-            '<img src="{}" width="24" height="24" style="border-radius:4px;object-fit:cover;" />',
-            cloudinary_thumb(obj.image_url, 24),
-        )
-    image_col.short_description = "Image"
-
-    def image_preview(self, obj):
-        if not obj.image_url:
-            return "—"
-        return format_html(
-            '<img src="{}" width="96" height="96" style="border-radius:8px;object-fit:cover;" />',
-            cloudinary_thumb(obj.image_url, 96),
-        )
-    image_preview.short_description = "Preview"
-
-# -------------------------------------------------
-# COCKTAIL ADMIN
-# -------------------------------------------------
-
-@admin.register(Cocktail)
-class CocktailAdmin(admin.ModelAdmin):
-    form = CocktailAdminForm
-    inlines = [CocktailIngredientInline]
-
-    list_display = ("id", "name", "status", "price_admin", "abv_admin", "image_col")
-    list_filter = ("status",)
-    search_fields = ("name", "slug")
-    readonly_fields = ("image_preview", "created_at", "updated_at", "price_auto_readonly")
-
-    fieldsets = (
-        (None, {
-            "fields": ("name", "slug", "story_long"),
-        }),
-        ("Media", {
-            "fields": ("image_url", "image_preview", "video_url"),
-        }),
-        ("Status & system", {
-            "fields": ("status", "price_auto_readonly", "created_at", "updated_at"),
-        }),
-    )
-
-    # list columns
-
-    def price_admin(self, obj):
-        val = compute_cocktail_cost(obj)
-        return f"{val:.2f}"
-    price_admin.short_description = "Price"
-
-    def abv_admin(self, obj):
-        # Try to read from summary if available
-        try:
-            if hasattr(obj, "summary") and getattr(obj, "summary", None):
-                pct = getattr(obj.summary, "abv_percent", None)
-            else:
-                summary = CocktailSummary.objects.filter(cocktail=obj).only("abv_percent").first()
-                pct = summary.abv_percent if summary else None
-            return f"{pct:.2f}" if pct is not None else "—"
-        except Exception:
-            return "—"
-    abv_admin.short_description = "ABV %"
-
-    def image_col(self, obj):
-        url = getattr(obj, "image_url", "") or ""
-        if not url:
-            return "—"
-        return format_html(
-            '<img src="{}" width="24" height="24" style="border-radius:4px;object-fit:cover;" />',
-            cloudinary_thumb(url, 24),
-        )
-    image_col.short_description = "Image"
-
-    # readonly widgets shown on the form
-
-    def image_preview(self, obj):
-        url = getattr(obj, "image_url", "") or ""
-        if not url:
-            return "—"
-        return format_html(
-            '<img src="{}" width="96" height="96" style="border-radius:8px;object-fit:cover;" />',
-            cloudinary_thumb(url, 96),
-        )
-    image_preview.short_description = "Preview"
-
-    def price_auto_readonly(self, obj):
-        if not obj or not getattr(obj, "pk", None):
-            return "—"
-        val = compute_cocktail_cost(obj)
-        return format_html("<strong>{:.2f}</strong>", val)
-    price_auto_readonly.short_description = "Price (auto)"
-
-# -------------------------------------------------
-# PRICING SETTINGS ADMIN
-# -------------------------------------------------
-
-@admin.register(PricingSettings)
-class PricingSettingsAdmin(admin.ModelAdmin):
-    def labor_display(self, obj):
-        val = getattr(obj, "labor_cost_per_cocktail", None)
-        if val is None:
-            val = getattr(obj, "labor_per_cocktail", None)
-        return f"{Decimal(val):.2f}" if val is not None else "—"
-    labor_display.short_description = "Labor per cocktail"
-
-    list_display = ("id", "labor_display")
-    # Leave the form simple; whichever of the two fields exists will render.
-    fields = ("labor_cost_per_cocktail",)
-
-# -------------------------------------------------
-# COCKTAIL SUMMARY (read-only, resilient to schema)
-# -------------------------------------------------
+# --- Cocktail summary (read-only) --------------------------------------------
 
 @admin.register(CocktailSummary)
 class CocktailSummaryAdmin(admin.ModelAdmin):
-    """
-    Read-only viewer that adapts to whichever columns your summary view exposes.
-    """
-    list_display = ("display_cocktail", "abv_col", "price_col")
+    """Display-only rollup. We compute price with utils and show cocktail name safely."""
+
+    list_display = ("cocktail_name", "abv_auto", "price_auto")
     search_fields = ("cocktail__name",)
 
-    # hard-disable CRUD
-    def has_add_permission(self, request): return False
-    def has_change_permission(self, request, obj=None): return False
-    def has_delete_permission(self, request, obj=None): return False
+    def has_add_permission(self, request):
+        return False
 
-    # columns that tolerate missing fields
-    def display_cocktail(self, obj):
-        c = getattr(obj, "cocktail", None)
-        return c if c is not None else "—"
-    display_cocktail.short_description = "Cocktail"
+    def has_change_permission(self, request, obj=None):
+        return False
 
-    def abv_col(self, obj):
-        pct = getattr(obj, "abv_percent", None)
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @admin.display(description="Cocktail")
+    def cocktail_name(self, obj):
+        # Works whether model has FK or an integer id
+        ck = getattr(obj, "cocktail", None)
+        if isinstance(ck, Cocktail):
+            return ck.name
+        # integer id or None
+        cid = ck if isinstance(ck, int) else getattr(obj, "id", None)
         try:
-            return f"{pct:.2f}" if pct is not None else "—"
+            return Cocktail.objects.only("name").get(pk=cid).name
         except Exception:
             return "—"
-    abv_col.short_description = "ABV %"
 
-    def price_col(self, obj):
-        # Prefer summary-provided prices if present; otherwise compute
-        for attr in ("price_rounded", "price_raw", "price"):
-            val = getattr(obj, attr, None)
-            if val is not None:
-                try:
-                    return f"{Decimal(val):.2f}"
-                except Exception:
-                    return str(val)
-        c = getattr(obj, "cocktail", None)
-        if c is not None:
-            try:
-                return f"{compute_cocktail_cost(c):.2f}"
-            except Exception:
-                pass
-        return "—"
-    price_col.short_description = "Price"
+    @admin.display(description="Price")
+    def price_auto(self, obj):
+        # Get a real cocktail instance for pricing
+        ck = getattr(obj, "cocktail", None)
+        cocktail = ck if isinstance(ck, Cocktail) else Cocktail.objects.filter(pk=getattr(obj, "id", None)).first()
+        if not cocktail:
+            return "—"
+        val = safe_price(cocktail)
+        return f"{val:.2f}" if val is not None else "—"
+
+    @admin.display(description="ABV %")
+    def abv_auto(self, obj):
+        ck = getattr(obj, "cocktail", None)
+        cocktail = ck if isinstance(ck, Cocktail) else Cocktail.objects.filter(pk=getattr(obj, "id", None)).first()
+        if not cocktail:
+            return "—"
+        val = safe_abv(cocktail)
+        return f"{val:.2f}" if val is not None else "—"
+
+
+# --- Pricing settings admin (robust to field names) --------------------------
+
+@admin.register(PricingSettings)
+class PricingSettingsAdmin(admin.ModelAdmin):
+    """Minimal & resilient; avoids referencing non-existing field names."""
+
+    def get_list_display(self, request):
+        # Show whatever the model really has, in a stable order.
+        names = [f.name for f in PricingSettings._meta.fields if f.editable]
+        if "id" in names:
+            names.remove("id")
+            names = ["id"] + names
+        return names
+
+    search_fields = tuple(f.name for f in PricingSettings._meta.fields if isinstance(f, (models.CharField,)))

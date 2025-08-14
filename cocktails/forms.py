@@ -1,25 +1,23 @@
-from decimal import Decimal, ROUND_HALF_UP
 from django import forms
-from django.apps import apps
 
-# -----------------------------
-# Shared helpers
-# -----------------------------
+from .models import CocktailIngredient, Ingredient
 
-UNIT_CHOICES = (
+# Units shown in admin only (data still stored as string in DB)
+UNIT_CHOICES = [
     ("oz", "oz"),
     ("leaf", "leaf"),
     ("wedge", "wedge"),
     ("dash", "dash"),
-)
+]
 
-INGREDIENT_TYPE_CHOICES = (
+# Optional: a tiny, safe guard so "type" is always one of our choices
+INGREDIENT_TYPE_CHOICES = [
     ("spirit", "Spirits"),
     ("homemade", "Homemade"),
     ("vermouth", "Vermouth"),
     ("liqueur", "Liqueurs"),
     ("wine", "Wines"),
-    ("beer", "Beer and cider"),
+    ("beer_cider", "Beer and cider"),
     ("bitters", "Bitters"),
     ("syrup", "Syrups"),
     ("juice", "Juices"),
@@ -36,84 +34,24 @@ INGREDIENT_TYPE_CHOICES = (
     ("sauce_oil", "Sauces and oil"),
     ("spice", "Spices"),
     ("nuts_sweet", "Nuts and Sweet"),
-)
-
-def _quantize_money(x: Decimal) -> Decimal:
-    if x is None:
-        return Decimal("0.00")
-    return x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-def compute_cocktail_cost(cocktail) -> Decimal:
-    """
-    Compute cost defensively: never rely on a particular related_name.
-    """
-    CocktailIngredient = apps.get_model("cocktails", "CocktailIngredient")
-    PricingSettings = apps.get_model("cocktails", "PricingSettings")
-
-    total = Decimal("0")
-    rows = (
-        CocktailIngredient.objects
-        .filter(cocktail=cocktail)
-        .select_related("ingredient")
-        .only("amount_oz", "ingredient__cost_per_oz")
-    )
-    for r in rows:
-        amt = r.amount_oz or Decimal("0")
-        cpo = r.ingredient.cost_per_oz if r.ingredient else Decimal("0")
-        total += (amt * cpo)
-
-    ps = PricingSettings.objects.first()
-    if ps is not None:
-        labor = getattr(ps, "labor_cost_per_cocktail", None)
-        if labor is None:
-            labor = getattr(ps, "labor_per_cocktail", None)
-        if labor:
-            total += Decimal(labor)
-
-    return _quantize_money(total)
-
-
-# -----------------------------
-# Forms
-# -----------------------------
-
-class IngredientAdminForm(forms.ModelForm):
-    type = forms.ChoiceField(
-        choices=(("", "—"),) + INGREDIENT_TYPE_CHOICES,
-        required=False,
-    )
-
-    class Meta:
-        model = apps.get_model("cocktails", "Ingredient")
-        fields = "__all__"
+]
 
 
 class CocktailIngredientInlineForm(forms.ModelForm):
     unit_input = forms.ChoiceField(choices=UNIT_CHOICES, required=False)
 
     class Meta:
-        model = apps.get_model("cocktails", "CocktailIngredient")
+        model = CocktailIngredient
         fields = "__all__"
 
 
-class CocktailAdminForm(forms.ModelForm):
-    price_auto_display = forms.DecimalField(
-        label="Price (auto)",
+class IngredientAdminForm(forms.ModelForm):
+    # keep free text in DB, but in admin show dropdown for consistency
+    type = forms.ChoiceField(
         required=False,
-        disabled=True,
-        decimal_places=2,
-        max_digits=10,
-        help_text="Calculated from ingredients + labor (read-only).",
+        choices=[("", "—")] + INGREDIENT_TYPE_CHOICES,
     )
 
     class Meta:
-        model = apps.get_model("cocktails", "Cocktail")
+        model = Ingredient
         fields = "__all__"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        instance = kwargs.get("instance")
-        if instance and instance.pk:
-            self.fields["price_auto_display"].initial = compute_cocktail_cost(instance)
-        else:
-            self.fields["price_auto_display"].initial = Decimal("0.00")
