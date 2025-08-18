@@ -4,12 +4,12 @@ from .models import Ingredient, CocktailIngredient
 # --- Ingredient admin form: force a clean, fixed set of types via dropdown ---
 INGREDIENT_TYPE_CHOICES = [
     ("spirit", "Spirits"),
-    ("homemade", "Homemade"),
-    ("vermouth", "Vermouth"),
     ("liqueur", "Liqueurs"),
+    ("vermouth", "Vermouth"),
+    ("bitters", "Bitters"),
     ("wine", "Wines"),
     ("beer_cider", "Beer and cider"),
-    ("bitters", "Bitters"),
+    ("homemade", "Homemade"),
     ("syrup", "Syrups"),
     ("juice", "Juices"),
     ("soft_drink", "Water and soft drinks"),
@@ -25,6 +25,7 @@ INGREDIENT_TYPE_CHOICES = [
     ("sauce_oil", "Sauces and oil"),
     ("spice", "Spices"),
     ("nuts_sweet", "Nuts and Sweet"),
+    ("ice", "Ice"),
 ]
 
 class IngredientAdminForm(forms.ModelForm):
