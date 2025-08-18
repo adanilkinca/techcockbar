@@ -1,11 +1,16 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from django.db.models import Value
-from django.db.models.functions import Coalesce
+from django.conf import settings
 from ..models import Cocktail, CocktailIngredient, CocktailSummary
 from ..forms import CocktailIngredientInlineForm
 
-# Inline for recipe rows
+# Use settings.NO_IMAGE_URL if present; otherwise fall back to your Cloudinary URL
+PLACEHOLDER = getattr(
+    settings,
+    "NO_IMAGE_URL",
+    "https://res.cloudinary.com/dau9qbp3l/image/upload/v1755145790/no-photo-master.png",
+)
+
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
     form = CocktailIngredientInlineForm
@@ -22,7 +27,7 @@ class CocktailAdmin(admin.ModelAdmin):
     list_filter = ("status",)
     search_fields = ("name", "slug")
     ordering = ("id",)
-    prepopulated_fields = {"slug": ("name",)}  # auto create slug from name
+    prepopulated_fields = {"slug": ("name",)}
 
     fieldsets = (
         (None, {
@@ -37,15 +42,14 @@ class CocktailAdmin(admin.ModelAdmin):
     )
     readonly_fields = ("image_preview", "price_auto", "created_at", "updated_at")
 
-    # --- List columns (price & ABV pulled from CocktailSummary view/table if present) ---
-
+    # --- Helpers ---
     def _summary(self, obj):
-        # Avoid joins that were throwing errors earlier; do a small single lookup.
         try:
             return CocktailSummary.objects.only("abv_percent", "price_suggested").get(id=obj.id)
         except CocktailSummary.DoesNotExist:
             return None
 
+    # --- List columns ---
     @admin.display(description="Price")
     def price_list(self, obj):
         s = self._summary(obj)
@@ -62,17 +66,23 @@ class CocktailAdmin(admin.ModelAdmin):
 
     @admin.display(description="Preview")
     def image_preview(self, obj):
-        if not obj.image_url:
-            return format_html('<div style="opacity:.5">No image</div>')
-        return format_html('<img src="{}" style="height:120px;width:auto;border-radius:8px;" />', obj.image_url)
+        url = obj.image_url or PLACEHOLDER
+        return format_html(
+            '<img src="{}" style="height:120px;width:auto;border-radius:8px;" />',
+            url,
+        )
 
     @admin.display(description="Image")
     def image_icon(self, obj):
+        # Keep list blank for missing images so you can see what's not set
         if not obj.image_url:
             return "—"
-        return format_html('<img src="{}" style="height:18px;width:auto;border-radius:3px;" />', obj.image_url)
+        return format_html(
+            '<img src="{}" style="height:18px;width:auto;border-radius:3px;" />',
+            obj.image_url,
+        )
 
-    # Show calculated price inside the form as read-only
+    # Read-only price inside the form
     @admin.display(description="Price (auto)")
     def price_auto(self, obj):
         s = self._summary(obj)
