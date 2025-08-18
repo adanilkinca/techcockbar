@@ -1,12 +1,14 @@
 # cocktails/admin/cocktails.py
 from django.contrib import admin
 from django.utils.html import format_html
+from django.utils.text import slugify
+from django.utils import timezone
 from django.conf import settings
 
 from ..models import Cocktail, CocktailIngredient, CocktailSummary
-from ..forms import CocktailIngredientInlineForm  # keeps the unit dropdown (oz, wedge, leaf, dash)
+from ..forms import CocktailIngredientInlineForm
 
-# Placeholder for previews only (list view still shows blank when image_url is missing)
+# Fallback placeholder if settings.NO_IMAGE_URL is not defined
 PLACEHOLDER = getattr(
     settings,
     "NO_IMAGE_URL",
@@ -16,9 +18,17 @@ PLACEHOLDER = getattr(
 
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
-    form = CocktailIngredientInlineForm        # <-- important: binds the ChoiceField for unit_input
+    form = CocktailIngredientInlineForm
     extra = 0
-    fields = ("seq", "ingredient", "amount_input", "unit_input", "amount_oz", "prep_note", "is_optional")
+    fields = (
+        "seq",
+        "ingredient",
+        "amount_input",
+        "unit_input",
+        "amount_oz",
+        "prep_note",
+        "is_optional",
+    )
     readonly_fields = ("amount_oz",)
     ordering = ("seq",)
 
@@ -27,57 +37,83 @@ class CocktailIngredientInline(admin.TabularInline):
 class CocktailAdmin(admin.ModelAdmin):
     inlines = [CocktailIngredientInline]
 
-    list_display = ("name", "status", "price_list", "abv_list", "image_icon")
-    list_filter = ("status",)
-    search_fields = ("name", "slug")
-    ordering = ("id",)
+    # Auto-fill slug from name in the admin UI
     prepopulated_fields = {"slug": ("name",)}
 
+    # We do NOT show flavor_scale here (edited later in summaries)
     fieldsets = (
-        (None, {"fields": ("name", "slug", "story_long")}),
+        ("", {"fields": ("name", "slug", "story_long")}),
         ("Media", {"fields": ("image_url", "image_preview", "video_url")}),
         ("Status & system", {"fields": ("status", "price_auto", "created_at", "updated_at")}),
     )
     readonly_fields = ("image_preview", "price_auto", "created_at", "updated_at")
 
-    # -------- helpers --------
-    def _summary(self, obj):
-        try:
-            return CocktailSummary.objects.only("abv_percent", "price_suggested").get(id=obj.id)
-        except CocktailSummary.DoesNotExist:
-            return None
+    list_display = ("name", "status", "price_column", "abv_column", "image_list")
+    search_fields = ("name", "slug")
+    ordering = ("name",)
 
-    # -------- list columns --------
-    @admin.display(description="Price")
-    def price_list(self, obj):
-        s = self._summary(obj)
-        if not s or s.price_suggested is None:
-            return "—"
-        return f"{s.price_suggested:.2f}"
+    # ------------------- persistence helpers -------------------
 
-    @admin.display(description="ABV %")
-    def abv_list(self, obj):
-        s = self._summary(obj)
-        if not s or s.abv_percent is None:
-            return "—"
-        return f"{s.abv_percent:.2f}"
+    def _ensure_unique_slug(self, base: str, *, instance_id=None) -> str:
+        """
+        Make a unique slug from `base`. If a cocktail with the same slug exists,
+        append -2, -3, ... until it's unique.
+        """
+        s = slugify(base) or "item"
+        original = s
+        i = 2
+        while True:
+            qs = Cocktail.objects.filter(slug=s)
+            if instance_id:
+                qs = qs.exclude(pk=instance_id)
+            if not qs.exists():
+                return s
+            s = f"{original}-{i}"
+            i += 1
 
-    @admin.display(description="Image")
-    def image_icon(self, obj):
-        # Blank in list when missing so you can see which ones still need images
-        if not obj.image_url:
-            return "—"
-        return format_html('<img src="{}" style="height:18px;width:auto;border-radius:3px;" />', obj.image_url)
+    def save_model(self, request, obj, form, change):
+        # Guarantee a slug even if JS didn't run
+        if not obj.slug:
+            obj.slug = self._ensure_unique_slug(obj.name, instance_id=obj.pk)
 
-    # -------- form read-only fields --------
+        # DB safety: never allow NULL flavor_scale (MySQL strict)
+        if getattr(obj, "flavor_scale", None) is None:
+            obj.flavor_scale = 0
+
+        # DB requires created_at NOT NULL; bump updated_at on every save
+        now = timezone.now()
+        if not obj.created_at:
+            obj.created_at = now
+        obj.updated_at = now
+
+        super().save_model(request, obj, form, change)
+
+    # ------------------- UI helpers -------------------
+
     @admin.display(description="Preview")
-    def image_preview(self, obj):
+    def image_preview(self, obj: Cocktail):
         url = obj.image_url or PLACEHOLDER
-        return format_html('<img src="{}" style="height:120px;width:auto;border-radius:8px;" />', url)
+        return format_html('<img src="{}" style="height:110px;width:auto;border-radius:6px;" />', url)
 
     @admin.display(description="Price (auto)")
-    def price_auto(self, obj):
-        s = self._summary(obj)
-        if not s or s.price_suggested is None:
-            return "—"
-        return f"{s.price_suggested:.3f}"
+    def price_auto(self, obj: Cocktail):
+        s = CocktailSummary.objects.filter(id=obj.pk).only("price_suggested").first()
+        return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
+
+    @admin.display(description="PRICE")
+    def price_column(self, obj: Cocktail):
+        s = CocktailSummary.objects.filter(id=obj.pk).only("price_suggested").first()
+        return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
+
+    @admin.display(description="ABV %")
+    def abv_column(self, obj: Cocktail):
+        s = CocktailSummary.objects.filter(id=obj.pk).only("abv_percent").first()
+        return "—" if not s or s.abv_percent is None else f"{s.abv_percent:.2f}"
+
+    @admin.display(description="IMAGE")
+    def image_list(self, obj: Cocktail):
+        return (
+            "—"
+            if not obj.image_url
+            else format_html('<img src="{}" style="height:18px;width:auto;border-radius:3px;" />', obj.image_url)
+        )

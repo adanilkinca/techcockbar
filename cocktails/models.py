@@ -33,7 +33,7 @@ class Cocktail(models.Model):
     slug = models.CharField(max_length=140, unique=True)
     name = models.CharField(max_length=255)
     glass_type = models.CharField(max_length=80, null=True, blank=True)
-    flavor_scale = models.PositiveSmallIntegerField()  # 1..10
+    flavor_scale = models.PositiveSmallIntegerField(default=0)  # 1..10
     invention_year = models.SmallIntegerField(null=True, blank=True)
     description_short = models.TextField(null=True, blank=True)
     story_long = models.TextField(null=True, blank=True)
