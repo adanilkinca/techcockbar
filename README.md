@@ -15,7 +15,7 @@ py -m venv .venv
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Create your local .env based on .env.example and fill TiDB password
+# (skip on prod!) Create your local .env based on .env.example and fill TiDB password
 copy .env.example .env
 notepad .env
 
