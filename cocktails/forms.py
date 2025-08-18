@@ -1,16 +1,7 @@
 from django import forms
+from .models import Ingredient, CocktailIngredient
 
-from .models import CocktailIngredient, Ingredient
-
-# Units shown in admin only (data still stored as string in DB)
-UNIT_CHOICES = [
-    ("oz", "oz"),
-    ("leaf", "leaf"),
-    ("wedge", "wedge"),
-    ("dash", "dash"),
-]
-
-# Optional: a tiny, safe guard so "type" is always one of our choices
+# --- Ingredient admin form: force a clean, fixed set of types via dropdown ---
 INGREDIENT_TYPE_CHOICES = [
     ("spirit", "Spirits"),
     ("homemade", "Homemade"),
@@ -36,22 +27,25 @@ INGREDIENT_TYPE_CHOICES = [
     ("nuts_sweet", "Nuts and Sweet"),
 ]
 
+class IngredientAdminForm(forms.ModelForm):
+    # Ingredient.type is a CharField in DB; expose a dropdown here.
+    type = forms.ChoiceField(choices=[("", "—")] + INGREDIENT_TYPE_CHOICES, required=False)
+
+    class Meta:
+        model = Ingredient
+        fields = "__all__"
+
+# --- Cocktail ingredient inline: unit dropdown (oz/leaf/wedge/dash) ---
+UNIT_CHOICES = [
+    ("oz", "oz"),
+    ("leaf", "leaf"),
+    ("wedge", "wedge"),
+    ("dash", "dash"),  # ≈ 0.03 oz (conversion handled by DB logic / existing code)
+]
 
 class CocktailIngredientInlineForm(forms.ModelForm):
     unit_input = forms.ChoiceField(choices=UNIT_CHOICES, required=False)
 
     class Meta:
         model = CocktailIngredient
-        fields = "__all__"
-
-
-class IngredientAdminForm(forms.ModelForm):
-    # keep free text in DB, but in admin show dropdown for consistency
-    type = forms.ChoiceField(
-        required=False,
-        choices=[("", "—")] + INGREDIENT_TYPE_CHOICES,
-    )
-
-    class Meta:
-        model = Ingredient
         fields = "__all__"
