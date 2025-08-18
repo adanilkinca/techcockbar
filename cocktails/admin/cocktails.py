@@ -1,23 +1,27 @@
+# cocktails/admin/cocktails.py
 from django.contrib import admin
 from django.utils.html import format_html
 from django.conf import settings
-from ..models import Cocktail, CocktailIngredient, CocktailSummary
-from ..forms import CocktailIngredientInlineForm
 
-# Use settings.NO_IMAGE_URL if present; otherwise fall back to your Cloudinary URL
+from ..models import Cocktail, CocktailIngredient, CocktailSummary
+from ..forms import CocktailIngredientInlineForm  # keeps the unit dropdown (oz, wedge, leaf, dash)
+
+# Placeholder for previews only (list view still shows blank when image_url is missing)
 PLACEHOLDER = getattr(
     settings,
     "NO_IMAGE_URL",
     "https://res.cloudinary.com/dau9qbp3l/image/upload/v1755145790/no-photo-master.png",
 )
 
+
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
-    form = CocktailIngredientInlineForm
+    form = CocktailIngredientInlineForm        # <-- important: binds the ChoiceField for unit_input
     extra = 0
     fields = ("seq", "ingredient", "amount_input", "unit_input", "amount_oz", "prep_note", "is_optional")
     readonly_fields = ("amount_oz",)
     ordering = ("seq",)
+
 
 @admin.register(Cocktail)
 class CocktailAdmin(admin.ModelAdmin):
@@ -30,26 +34,20 @@ class CocktailAdmin(admin.ModelAdmin):
     prepopulated_fields = {"slug": ("name",)}
 
     fieldsets = (
-        (None, {
-            "fields": ("name", "slug", "story_long")
-        }),
-        ("Media", {
-            "fields": ("image_url", "image_preview", "video_url"),
-        }),
-        ("Status & system", {
-            "fields": ("status", "price_auto", "created_at", "updated_at"),
-        }),
+        (None, {"fields": ("name", "slug", "story_long")}),
+        ("Media", {"fields": ("image_url", "image_preview", "video_url")}),
+        ("Status & system", {"fields": ("status", "price_auto", "created_at", "updated_at")}),
     )
     readonly_fields = ("image_preview", "price_auto", "created_at", "updated_at")
 
-    # --- Helpers ---
+    # -------- helpers --------
     def _summary(self, obj):
         try:
             return CocktailSummary.objects.only("abv_percent", "price_suggested").get(id=obj.id)
         except CocktailSummary.DoesNotExist:
             return None
 
-    # --- List columns ---
+    # -------- list columns --------
     @admin.display(description="Price")
     def price_list(self, obj):
         s = self._summary(obj)
@@ -64,25 +62,19 @@ class CocktailAdmin(admin.ModelAdmin):
             return "—"
         return f"{s.abv_percent:.2f}"
 
+    @admin.display(description="Image")
+    def image_icon(self, obj):
+        # Blank in list when missing so you can see which ones still need images
+        if not obj.image_url:
+            return "—"
+        return format_html('<img src="{}" style="height:18px;width:auto;border-radius:3px;" />', obj.image_url)
+
+    # -------- form read-only fields --------
     @admin.display(description="Preview")
     def image_preview(self, obj):
         url = obj.image_url or PLACEHOLDER
-        return format_html(
-            '<img src="{}" style="height:120px;width:auto;border-radius:8px;" />',
-            url,
-        )
+        return format_html('<img src="{}" style="height:120px;width:auto;border-radius:8px;" />', url)
 
-    @admin.display(description="Image")
-    def image_icon(self, obj):
-        # Keep list blank for missing images so you can see what's not set
-        if not obj.image_url:
-            return "—"
-        return format_html(
-            '<img src="{}" style="height:18px;width:auto;border-radius:3px;" />',
-            obj.image_url,
-        )
-
-    # Read-only price inside the form
     @admin.display(description="Price (auto)")
     def price_auto(self, obj):
         s = self._summary(obj)
