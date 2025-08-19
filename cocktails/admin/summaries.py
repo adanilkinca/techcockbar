@@ -1,17 +1,16 @@
+from decimal import Decimal
 from django.contrib import admin
-from ..models import CocktailSummary
+from cocktails.models import CocktailSummary
 
 
 @admin.register(CocktailSummary)
 class CocktailSummaryAdmin(admin.ModelAdmin):
-    # Keep name sortable; show ABV; format price to 2 decimals
-    list_display = ("name", "abv_percent", "price_column")
-    search_fields = ("name", "slug")
-    ordering = ("name",)
+    list_display = ("name", "abv_percent_display", "price_suggested_display")
 
-    # Show the detail page as read-only (nice for viewing)
-    readonly_fields = tuple(f.name for f in CocktailSummary._meta.fields)
+    @admin.display(description="ABV percent")
+    def abv_percent_display(self, obj):
+        return f"{Decimal(obj.abv_percent):.2f}" if obj.abv_percent is not None else "—"
 
-    @admin.display(ordering="price_suggested", description="Price suggested")
-    def price_column(self, obj: CocktailSummary):
-        return "—" if obj.price_suggested is None else f"{obj.price_suggested:.2f}"
+    @admin.display(description="Price suggested")
+    def price_suggested_display(self, obj):
+        return f"{Decimal(obj.price_suggested):.2f}" if obj.price_suggested is not None else "—"
