@@ -1,6 +1,7 @@
 # cocktails/admin/cocktails.py
 from decimal import Decimal
 
+from django import forms
 from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.text import slugify
@@ -8,6 +9,66 @@ from django.utils import timezone
 
 from ..models import Cocktail, CocktailIngredient, CocktailSummary
 from ..forms import CocktailIngredientInlineForm
+
+
+# ---- glass choices resolver (constants-first, robust autodetect, model fallback) ----
+def _is_choices_like(value) -> bool:
+    """Return True if value looks like Django choices: [(value, label), ...]."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    first = value[0]
+    return isinstance(first, (list, tuple)) and len(first) == 2
+
+def _resolve_glass_choices():
+    """
+    Try to find choices in cocktails/constants.py using several common names.
+    If not present, fall back to model field choices so the admin never shows
+    an empty dropdown.
+    """
+    # 1) constants.py (robust autodetect)
+    try:
+        from .. import constants as _c  # type: ignore
+        # Common names first
+        for name in (
+            "GLASS_CHOICES",
+            "GLASS_TYPE_CHOICES",
+            "GLASS_TYPES",
+            "GLASSES",
+            "GLASS",
+        ):
+            if hasattr(_c, name):
+                val = getattr(_c, name)
+                if _is_choices_like(val):
+                    return list(val)
+
+        # Any variable containing GLASS and CHOICE/TYPES that matches shape
+        for name in dir(_c):
+            up = name.upper()
+            if "GLASS" in up and ("CHOICE" in up or "TYPE" in up or "TYPES" in up):
+                val = getattr(_c, name)
+                if _is_choices_like(val):
+                    return list(val)
+    except Exception:
+        pass
+
+    # 2) Fallback: read choices off model fields
+    try:
+        field = Cocktail._meta.get_field("glass_type")
+        if getattr(field, "choices", None):
+            return list(field.choices)
+    except Exception:
+        pass
+    try:
+        field = CocktailSummary._meta.get_field("glass_type")
+        if getattr(field, "choices", None):
+            return list(field.choices)
+    except Exception:
+        pass
+
+    # 3) Last resort: empty list (safe; renders an empty select without crashing)
+    return []
+
+GLASS_CHOICES_RESOLVED = _resolve_glass_choices()
 
 
 # --- helpers ---------------------------------------------------------------
@@ -18,7 +79,6 @@ def _to_oz(amount, unit):
       - 'oz' passes through
       - 'ml' converts to oz (1 oz = 29.5735 ml)
       - everything else -> 0 to avoid guessing
-    Mirrors commit a8df4be logic.
     """
     if amount is None:
         return Decimal("0")
@@ -31,13 +91,36 @@ def _to_oz(amount, unit):
     return Decimal("0")
 
 
+# --- admin forms -----------------------------------------------------------
+
+class CocktailAdminForm(forms.ModelForm):
+    # Make it a dropdown; source from constants (or model choices fallback)
+    glass_type = forms.ChoiceField(
+        choices=GLASS_CHOICES_RESOLVED,
+        required=False,
+        label="Glass type",
+    )
+
+    class Meta:
+        model = Cocktail
+        fields = [
+            "name",
+            "slug",
+            "story_long",
+            "image_url",
+            "video_url",
+            "status",
+            "glass_type",
+        ]
+
+
 # --- inlines ---------------------------------------------------------------
 
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
     form = CocktailIngredientInlineForm
     extra = 0
-    # Hide amount_oz in the form (exactly like your prior fix)
+    # Keep working behavior: amount_oz is not edited directly
     fields = ("seq", "ingredient", "amount_input", "unit_input", "prep_note", "is_optional")
     ordering = ("seq",)
     verbose_name = "Cocktail ingredient"
@@ -48,6 +131,7 @@ class CocktailIngredientInline(admin.TabularInline):
 
 @admin.register(Cocktail)
 class CocktailAdmin(admin.ModelAdmin):
+    form = CocktailAdminForm  # apply Glass dropdown
     inlines = [CocktailIngredientInline]
 
     list_display = ("name", "status", "price_column", "abv_column", "image_list")
@@ -65,8 +149,8 @@ class CocktailAdmin(admin.ModelAdmin):
     # ---------- persistence hooks ----------
     def save_formset(self, request, form, formset, change):
         """
-        **The key fix** from your prior commits:
-        persist `amount_oz` for each inline so the SQL VIEW has fresh data.
+        Persist amount_oz for each inline so the SQL VIEW has fresh data.
+        (Matches prior working commits.)
         """
         instances = formset.save(commit=False)
         for obj in instances:
@@ -110,7 +194,6 @@ class CocktailAdmin(admin.ModelAdmin):
 
     @admin.display(description="PRICE")
     def price_column(self, obj: Cocktail):
-        # Read from the SQL view (same PK as Cocktail) – matches your earlier fix
         s = CocktailSummary.objects.filter(pk=obj.pk).only("price_suggested").first()
         return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
 
