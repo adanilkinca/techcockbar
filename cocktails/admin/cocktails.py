@@ -1,10 +1,10 @@
-# cocktails/admin/cocktails.py
+from decimal import Decimal
+
+from django.conf import settings
 from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.text import slugify
 from django.utils import timezone
-from django.conf import settings
-from .metrics import compute_price_and_abv
 
 from ..models import Cocktail, CocktailIngredient, CocktailSummary
 from ..forms import CocktailIngredientInlineForm
@@ -17,22 +17,49 @@ PLACEHOLDER = getattr(
 )
 
 
+# --- helpers -----------------------------------------------------------------
+
+def _to_oz(amount, unit):
+    """
+    Minimal, conservative conversion to ounces for admin-side persistence.
+    Only 'oz' is guaranteed in your current data; 'ml' included for convenience.
+    Everything else returns 0 so we never guess wrong.
+    """
+    if amount is None:
+        return Decimal("0")
+    unit = (unit or "").lower()
+    amt = Decimal(str(amount))
+    if unit == "oz":
+        return amt
+    if unit == "ml":
+        # 1 oz = 29.5735 ml
+        return amt / Decimal("29.5735")
+    # Unknown units -> don't try to infer
+    return Decimal("0")
+
+
+# --- inlines -----------------------------------------------------------------
+
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
     form = CocktailIngredientInlineForm
     extra = 0
+    # Hide amount_oz from the form; keep your unit dropdown intact
     fields = (
         "seq",
         "ingredient",
         "amount_input",
         "unit_input",
-        "amount_oz",
         "prep_note",
         "is_optional",
     )
-    readonly_fields = ("amount_oz",)
     ordering = ("seq",)
+    # keep the row compact
+    verbose_name = "Cocktail ingredient"
+    verbose_name_plural = "Cocktail ingredients"
 
+
+# --- admin -------------------------------------------------------------------
 
 @admin.register(Cocktail)
 class CocktailAdmin(admin.ModelAdmin):
@@ -53,7 +80,24 @@ class CocktailAdmin(admin.ModelAdmin):
     search_fields = ("name", "slug")
     ordering = ("name",)
 
-    # ------------------- persistence helpers -------------------
+    # ---------- persistence hooks ----------
+
+    def save_formset(self, request, form, formset, change):
+        """
+        Persist amount_oz for each inline so the SQL view (CocktailSummary)
+        immediately has the data it needs for price/ABV.
+        """
+        instances = formset.save(commit=False)
+
+        for obj in instances:
+            # Convert input + unit → ounces and store in amount_oz
+            obj.amount_oz = _to_oz(obj.amount_input, getattr(obj, "unit_input", None))
+            obj.save()
+
+        # Handle deletes & m2m
+        for obj in formset.deleted_objects:
+            obj.delete()
+        formset.save_m2m()
 
     def _ensure_unique_slug(self, base: str, *, instance_id=None) -> str:
         """
@@ -73,56 +117,28 @@ class CocktailAdmin(admin.ModelAdmin):
             i += 1
 
     def save_model(self, request, obj, form, change):
-        # Guarantee a slug even if JS didn't run
+        # Safety: guarantee slug even if client-side JS didn’t run
         if not obj.slug:
             obj.slug = self._ensure_unique_slug(obj.name, instance_id=obj.pk)
 
-        # DB safety: never allow NULL flavor_scale (MySQL strict)
-        if getattr(obj, "flavor_scale", None) is None:
-            obj.flavor_scale = 0
-
-        # DB requires created_at NOT NULL; bump updated_at on every save
+        # Safety: created/updated timestamps
         now = timezone.now()
         if not obj.created_at:
             obj.created_at = now
         obj.updated_at = now
 
         super().save_model(request, obj, form, change)
-        
-        # ——— Computed columns: price & ABV ———
-    def price_column(self, obj):
-        price, _ = compute_price_and_abv(obj)
-        return f"{price:.2f}"
-    price_column.short_description = "Price"
 
-    def abv_column(self, obj):
-        _, abv = compute_price_and_abv(obj)
-        return f"{abv:.2f}"
-    abv_column.short_description = "ABV %"
-
-    # (Optional) show it inside the form as read-only – keep your existing fields, just add this name:
-    def price_auto(self, obj):
-        if not obj or not obj.pk:
-            return "-"
-        price, _ = compute_price_and_abv(obj)
-        return f"{price:.2f}"
-    price_auto.short_description = "Price (auto)"
-
-
-    # ------------------- UI helpers -------------------
+    # ---------- UI helpers ----------
 
     @admin.display(description="Preview")
     def image_preview(self, obj: Cocktail):
         url = obj.image_url or PLACEHOLDER
         return format_html('<img src="{}" style="height:110px;width:auto;border-radius:6px;" />', url)
 
-    @admin.display(description="Price (auto)")
-    def price_auto(self, obj: Cocktail):
-        s = CocktailSummary.objects.filter(id=obj.pk).only("price_suggested").first()
-        return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
-
     @admin.display(description="PRICE")
     def price_column(self, obj: Cocktail):
+        # Read from your SQL view so values match the summaries section
         s = CocktailSummary.objects.filter(id=obj.pk).only("price_suggested").first()
         return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
 
@@ -138,3 +154,8 @@ class CocktailAdmin(admin.ModelAdmin):
             if not obj.image_url
             else format_html('<img src="{}" style="height:18px;width:auto;border-radius:3px;" />', obj.image_url)
         )
+
+    @admin.display(description="Price (auto)")
+    def price_auto(self, obj: Cocktail):
+        s = CocktailSummary.objects.filter(id=obj.pk).only("price_suggested").first()
+        return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
