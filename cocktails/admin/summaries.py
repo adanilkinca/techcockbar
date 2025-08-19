@@ -1,25 +1,17 @@
 from django.contrib import admin
 from ..models import CocktailSummary
 
+
 @admin.register(CocktailSummary)
 class CocktailSummaryAdmin(admin.ModelAdmin):
-    """
-    Read-only view of the DB summary (unmanaged model or DB view).
-    """
-    list_display = ("name", "abv_percent", "price_suggested")
+    # Keep name sortable; show ABV; format price to 2 decimals
+    list_display = ("name", "abv_percent", "price_column")
     search_fields = ("name", "slug")
-    ordering = ("id",)
+    ordering = ("name",)
 
-    # show everything as read-only
-    def has_add_permission(self, request):   # no create
-        return False
+    # Show the detail page as read-only (nice for viewing)
+    readonly_fields = tuple(f.name for f in CocktailSummary._meta.fields)
 
-    def has_change_permission(self, request, obj=None):  # detail page is view-only
-        # Allow opening the detail page but don't allow edits (Django still needs change perms for the page).
-        return True
-
-    def save_model(self, request, obj, form, change):    # block saving
-        return
-
-    def delete_model(self, request, obj):                # block deleting from admin
-        return
+    @admin.display(ordering="price_suggested", description="Price suggested")
+    def price_column(self, obj: CocktailSummary):
+        return "—" if obj.price_suggested is None else f"{obj.price_suggested:.2f}"

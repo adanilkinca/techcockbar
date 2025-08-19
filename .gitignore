@@ -16,6 +16,7 @@ media/
 .env
 .env.*.local
 .env.local
+/test_tidb.py
 
 # Virtual env
 .venv/
