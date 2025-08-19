@@ -1,197 +1,132 @@
+# cocktails/admin/cocktails.py
 from decimal import Decimal
-from django import forms
+
 from django.contrib import admin
-from django.db import connection
-from django.utils.safestring import mark_safe
+from django.utils.html import format_html
+from django.utils.text import slugify
+from django.utils import timezone
 
-from cocktails.models import Cocktail, CocktailIngredient
+from ..models import Cocktail, CocktailIngredient, CocktailSummary
+from ..forms import CocktailIngredientInlineForm
 
 
-# Inline (kept exactly like your working version: oz stays readonly)
+# --- helpers ---------------------------------------------------------------
+
+def _to_oz(amount, unit):
+    """
+    Minimal conversion used in your earlier fixes:
+      - 'oz' passes through
+      - 'ml' converts to oz (1 oz = 29.5735 ml)
+      - everything else -> 0 to avoid guessing
+    Mirrors commit a8df4be logic.
+    """
+    if amount is None:
+        return Decimal("0")
+    unit = (unit or "").lower()
+    amt = Decimal(str(amount))
+    if unit == "oz":
+        return amt
+    if unit == "ml":
+        return amt / Decimal("29.5735")
+    return Decimal("0")
+
+
+# --- inlines ---------------------------------------------------------------
+
 class CocktailIngredientInline(admin.TabularInline):
     model = CocktailIngredient
+    form = CocktailIngredientInlineForm
     extra = 0
-    fields = ("seq", "ingredient", "amount_input", "unit_input", "amount_oz", "prep_note")
-    readonly_fields = ("amount_oz",)
+    # Hide amount_oz in the form (exactly like your prior fix)
+    fields = ("seq", "ingredient", "amount_input", "unit_input", "prep_note", "is_optional")
     ordering = ("seq",)
+    verbose_name = "Cocktail ingredient"
+    verbose_name_plural = "Cocktail ingredients"
 
 
-# Dropdown choices for glass type (extend anytime)
-GLASS_TYPE_CHOICES = [
-    ("Highball", "Highball"),
-    ("Rocks", "Rocks / Old Fashioned"),
-    ("Shot", "Shot"),
-    ("Martini", "Martini / Cocktail"),
-    ("Hurricane", "Hurricane"),
-    ("Margarita", "Margarita"),
-    ("Coupe", "Coupe / Champagne Saucer"),
-    ("Collins", "Collins"),
-    ("Flute", "Flute"),
-    ("Irish Coffee", "Irish Coffee"),
-    ("Red Wine", "Red Wine / Wine"),
-    ("White Wine", "White Wine / Bowl / Orb"),
-    ("Nick & Nora", "Nick & Nora"),
-    ("Snifter", "Cognac / Snifter / Brandy"),
-    ("Tiki", "Tiki"),
-    ("Sling", "Sling"),
-    ("Pitcher", "Pitcher"),
-    ("Goblet", "Goblet"),
-    ("Jar", "Jar"),
-    ("Copper Mug", "Copper Mug"),
-    ("French Press", "French Press"),
-    ("Milkshake", "Milkshake"),
-    ("Punch Bowl", "Punch Bowl"),
-    ("Tea Cup", "Tea Cup"),
-]
-
-
-class CocktailAdminForm(forms.ModelForm):
-    # Optional glass type on the Cocktail form (defaults to Highball)
-    glass_type = forms.ChoiceField(
-        label="Glass type",
-        choices=GLASS_TYPE_CHOICES,
-        required=False,
-        initial="Highball",
-    )
-
-    class Meta:
-        model = Cocktail
-        fields = "__all__"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Pre-populate slug from name (keeps your previous behavior in the UI)
-        self.fields["slug"].help_text = "Leave empty to auto-generate from name."
-
-        # If editing, try to preload current glass type from summaries table/view
-        if self.instance and self.instance.pk:
-            glass = None
-            with connection.cursor() as c:
-                # Try physical table
-                try:
-                    c.execute("SELECT glass_type FROM cocktail_summaries WHERE id=%s", [self.instance.pk])
-                    row = c.fetchone()
-                    if row:
-                        glass = row[0]
-                except Exception:
-                    pass
-                # Fallback to view
-                if glass is None:
-                    try:
-                        c.execute("SELECT glass_type FROM cocktail_summary_v WHERE id=%s", [self.instance.pk])
-                        row = c.fetchone()
-                        if row:
-                            glass = row[0]
-                    except Exception:
-                        pass
-
-            if glass:
-                self.fields["glass_type"].initial = glass
-
+# --- admin -----------------------------------------------------------------
 
 @admin.register(Cocktail)
 class CocktailAdmin(admin.ModelAdmin):
-    form = CocktailAdminForm
     inlines = [CocktailIngredientInline]
 
-    list_display = ("name", "status", "price_display", "abv_display", "image_thumb")
-    list_filter = ("status",)
+    list_display = ("name", "status", "price_column", "abv_column", "image_list")
     search_fields = ("name", "slug")
-    # keep the convenient auto-fill for slug in the add/change form
+    ordering = ("name",)
     prepopulated_fields = {"slug": ("name",)}
 
     fieldsets = (
         ("Basics", {"fields": ("name", "slug", "story_long")}),
         ("Media", {"fields": ("image_url", "image_preview", "video_url")}),
-        ("Status & system", {"fields": ("status", "price_auto_display", "created_at", "updated_at", "glass_type")}),
+        ("Status & system", {"fields": ("status", "glass_type", "price_auto", "created_at", "updated_at")}),
     )
-    readonly_fields = ("image_preview", "price_auto_display", "created_at", "updated_at")
+    readonly_fields = ("image_preview", "price_auto", "created_at", "updated_at")
 
-    # ---------------- helpers ----------------
+    # ---------- persistence hooks ----------
+    def save_formset(self, request, form, formset, change):
+        """
+        **The key fix** from your prior commits:
+        persist `amount_oz` for each inline so the SQL VIEW has fresh data.
+        """
+        instances = formset.save(commit=False)
+        for obj in instances:
+            obj.amount_oz = _to_oz(obj.amount_input, getattr(obj, "unit_input", None))
+            obj.save()
+        # handle deletes & m2m
+        for obj in formset.deleted_objects:
+            obj.delete()
+        formset.save_m2m()
 
-    def _fetch_summary(self, obj):
-        """Return (price_suggested, abv_percent) or (None, None)."""
-        price = abv = None
-        with connection.cursor() as c:
-            # Preferred: view
-            try:
-                c.execute(
-                    "SELECT price_suggested, abv_percent FROM cocktail_summary_v WHERE id=%s",
-                    [obj.pk],
-                )
-                row = c.fetchone()
-                if row:
-                    price, abv = row
-            except Exception:
-                pass
+    def _ensure_unique_slug(self, base: str, *, instance_id=None) -> str:
+        s = slugify(base) or "item"
+        orig = s
+        i = 2
+        qs = Cocktail.objects.all()
+        if instance_id:
+            qs = qs.exclude(pk=instance_id)
+        while qs.filter(slug=s).exists():
+            s = f"{orig}-{i}"
+            i += 1
+        return s
 
-            # Fallback: physical table (if present)
-            if price is None and abv is None:
-                try:
-                    c.execute(
-                        "SELECT price_suggested, abv_percent FROM cocktail_summaries WHERE id=%s",
-                        [obj.pk],
-                    )
-                    row = c.fetchone()
-                    if row:
-                        price, abv = row
-                except Exception:
-                    pass
-        return price, abv
-
-    @staticmethod
-    def _fmt2(x):
-        return f"{Decimal(x):.2f}"
-
-    def image_preview(self, obj):
-        url = (obj.image_url or "").strip()
-        if not url:
-            url = "https://res.cloudinary.com/dau9qbp3l/image/upload/v1755145790/no-photo-master.png"
-        return mark_safe(f'<img src="{url}" style="height:90px;border-radius:8px;" />')
-    image_preview.short_description = "Preview"
-
-    def image_thumb(self, obj):
-        url = (obj.image_url or "").strip()
-        if not url:
-            url = "https://res.cloudinary.com/dau9qbp3l/image/upload/v1755145790/no-photo-master.png"
-        return mark_safe(f'<img src="{url}" style="height:22px;border-radius:4px;" />')
-    image_thumb.short_description = "Image"
-
-    def price_auto_display(self, obj):
-        price, _abv = self._fetch_summary(obj)
-        return self._fmt2(price) if price is not None else "—"
-    price_auto_display.short_description = "Price (auto)"
-
-    def price_display(self, obj):
-        price, _abv = self._fetch_summary(obj)
-        return self._fmt2(price) if price is not None else "—"
-    price_display.short_description = "Price"
-
-    def abv_display(self, obj):
-        _price, abv = self._fetch_summary(obj)
-        return self._fmt2(abv) if abv is not None else "—"
-    abv_display.short_description = "ABV %"
-
-    # Persist selected glass type when possible (no-op if only a view exists)
     def save_model(self, request, obj, form, change):
+        # Ensure slug and timestamps (kept from your code)
+        if not obj.slug:
+            obj.slug = self._ensure_unique_slug(obj.name, instance_id=obj.pk)
+        now = timezone.now()
+        if not obj.created_at:
+            obj.created_at = now
+        obj.updated_at = now
         super().save_model(request, obj, form, change)
-        selected_glass = form.cleaned_data.get("glass_type") or "Highball"
-        with connection.cursor() as c:
-            try:
-                c.execute(
-                    """
-                    INSERT INTO cocktail_summaries (id, slug, name, glass_type)
-                    VALUES (%s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE glass_type = VALUES(glass_type)
-                    """,
-                    [obj.pk, obj.slug, obj.name, selected_glass],
-                )
-            except Exception:
-                try:
-                    c.execute(
-                        "UPDATE cocktail_summaries SET glass_type=%s WHERE id=%s",
-                        [selected_glass, obj.pk],
-                    )
-                except Exception:
-                    # Only a view available ⇒ nothing to write (that’s OK)
-                    pass
+
+    # ---------- UI helpers ----------
+    @admin.display(description="Preview")
+    def image_preview(self, obj: Cocktail):
+        url = obj.image_url or ""
+        return (
+            format_html('<img src="{}" style="height:110px;width:auto;border-radius:6px;" />', url)
+            if url else format_html('<div style="opacity:.5">No image</div>')
+        )
+
+    @admin.display(description="PRICE")
+    def price_column(self, obj: Cocktail):
+        # Read from the SQL view (same PK as Cocktail) – matches your earlier fix
+        s = CocktailSummary.objects.filter(pk=obj.pk).only("price_suggested").first()
+        return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
+
+    @admin.display(description="ABV %")
+    def abv_column(self, obj: Cocktail):
+        s = CocktailSummary.objects.filter(pk=obj.pk).only("abv_percent").first()
+        return "—" if not s or s.abv_percent is None else f"{s.abv_percent:.2f}"
+
+    @admin.display(description="Price (auto)")
+    def price_auto(self, obj: Cocktail):
+        s = CocktailSummary.objects.filter(pk=obj.pk).only("price_suggested").first()
+        return "—" if not s or s.price_suggested is None else f"{s.price_suggested:.2f}"
+
+    @admin.display(description="IMAGE")
+    def image_list(self, obj: Cocktail):
+        return (
+            format_html('<img src="{}" style="height:18px;width:auto;border-radius:3px;" />', obj.image_url)
+            if obj.image_url else "—"
+        )

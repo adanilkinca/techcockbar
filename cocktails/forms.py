@@ -1,52 +1,88 @@
+# cocktails/forms.py
+from __future__ import annotations
+
 from django import forms
+from django.core.exceptions import ValidationError
+
 from .models import Ingredient, CocktailIngredient
 
-# --- Ingredient admin form: force a clean, fixed set of types via dropdown ---
-INGREDIENT_TYPE_CHOICES = [
-    ("spirit", "Spirits"),
-    ("liqueur", "Liqueurs"),
-    ("vermouth", "Vermouth"),
-    ("bitters", "Bitters"),
-    ("wine", "Wines"),
-    ("beer_cider", "Beer and cider"),
-    ("homemade", "Homemade"),
-    ("syrup", "Syrups"),
-    ("juice", "Juices"),
-    ("soft_drink", "Water and soft drinks"),
-    ("tea_coffee", "Tea and coffee"),
-    ("dairy", "Dairy"),
-    ("seafood", "Seafood"),
-    ("puree", "Puree"),
-    ("fruit", "Fruits"),
-    ("berry", "Berries"),
-    ("vegetable", "Vegetables"),
-    ("plant", "Plants"),
-    ("honey_jam", "Honey and jams"),
-    ("sauce_oil", "Sauces and oil"),
-    ("spice", "Spices"),
-    ("nuts_sweet", "Nuts and Sweet"),
-    ("ice", "Ice"),
-]
+
+def _unit_choices():
+    """
+    Pull choices from the model in one place.
+    Works with TextChoices (Unit.choices) or legacy UNIT_CHOICES.
+    """
+    unit_enum = getattr(CocktailIngredient, "Unit", None)
+    if unit_enum and hasattr(unit_enum, "choices"):
+        return list(unit_enum.choices)
+
+    legacy = getattr(CocktailIngredient, "UNIT_CHOICES", None)
+    if legacy:
+        return list(legacy)
+
+    # Fallback so admin never breaks (will be overwritten by real choices in model)
+    return [("oz", "oz"), ("ml", "ml")]
+
 
 class IngredientAdminForm(forms.ModelForm):
-    # Ingredient.type is a CharField in DB; expose a dropdown here.
-    type = forms.ChoiceField(choices=[("", "—")] + INGREDIENT_TYPE_CHOICES, required=False)
-
     class Meta:
         model = Ingredient
-        fields = "__all__"
+        fields = [
+            "name",
+            "type",
+            "abv_percent",
+            "cost_per_oz",
+            "is_housemade",
+            "notes",
+            "image_url",
+        ]
 
-# --- Cocktail ingredient inline: unit dropdown (oz/leaf/wedge/dash) ---
-UNIT_CHOICES = [
-    ("oz", "oz"),
-    ("leaf", "leaf"),
-    ("wedge", "wedge"),
-    ("dash", "dash"),  # ≈ 0.03 oz (conversion handled by DB logic / existing code)
-]
 
 class CocktailIngredientInlineForm(forms.ModelForm):
-    unit_input = forms.ChoiceField(choices=UNIT_CHOICES, required=False)
+    """
+    Critical: keep unit_input a ChoiceField (dropdown), not a text box.
+    """
+    unit_input = forms.ChoiceField(
+        choices=_unit_choices(),
+        required=True,
+        label="Unit input",
+    )
 
     class Meta:
         model = CocktailIngredient
-        fields = "__all__"
+        fields = [
+            "seq",
+            "ingredient",
+            "amount_input",
+            "unit_input",
+            "prep_note",
+            "is_optional",
+        ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["amount_input"].widget.attrs.setdefault("style", "width:120px")
+
+        # Edit case: show current value
+        if getattr(self.instance, "unit_input", None):
+            self.fields["unit_input"].initial = self.instance.unit_input
+            return
+
+        # Optional default from Ingredient if your model exposes it
+        ing: Ingredient | None = (
+            self.instance.ingredient
+            if getattr(self.instance, "ingredient_id", None)
+            else None
+        )
+        default_from_ing = getattr(ing, "default_unit", None)
+        if default_from_ing:
+            valid = {c[0] for c in self.fields["unit_input"].choices}
+            if default_from_ing in valid:
+                self.fields["unit_input"].initial = default_from_ing
+
+    def clean_unit_input(self):
+        val = self.cleaned_data.get("unit_input")
+        valid = {c[0] for c in self.fields["unit_input"].choices}
+        if val not in valid:
+            raise ValidationError("Select a valid unit.")
+        return val
