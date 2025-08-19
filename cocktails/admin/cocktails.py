@@ -4,6 +4,7 @@ from django.utils.html import format_html
 from django.utils.text import slugify
 from django.utils import timezone
 from django.conf import settings
+from .metrics import compute_price_and_abv
 
 from ..models import Cocktail, CocktailIngredient, CocktailSummary
 from ..forms import CocktailIngredientInlineForm
@@ -87,6 +88,26 @@ class CocktailAdmin(admin.ModelAdmin):
         obj.updated_at = now
 
         super().save_model(request, obj, form, change)
+        
+        # ——— Computed columns: price & ABV ———
+    def price_column(self, obj):
+        price, _ = compute_price_and_abv(obj)
+        return f"{price:.2f}"
+    price_column.short_description = "Price"
+
+    def abv_column(self, obj):
+        _, abv = compute_price_and_abv(obj)
+        return f"{abv:.2f}"
+    abv_column.short_description = "ABV %"
+
+    # (Optional) show it inside the form as read-only – keep your existing fields, just add this name:
+    def price_auto(self, obj):
+        if not obj or not obj.pk:
+            return "-"
+        price, _ = compute_price_and_abv(obj)
+        return f"{price:.2f}"
+    price_auto.short_description = "Price (auto)"
+
 
     # ------------------- UI helpers -------------------
 
