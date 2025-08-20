@@ -50,11 +50,18 @@ GLASS_CHOICES_RESOLVED = _resolve_glass_choices()
 class CocktailSummaryAdminForm(forms.ModelForm):
     """
     Editable form with all fields optional.
+    Ensures Price suggested renders with EXACTLY 2 decimals.
     """
     glass_type = forms.ChoiceField(
         choices=GLASS_CHOICES_RESOLVED,
         required=False,
         label="Glass type",
+    )
+    price_suggested = forms.DecimalField(
+        required=False,
+        decimal_places=2,   # <-- 2dp in the form
+        max_digits=12,
+        label="Price suggested",
     )
 
     class Meta:
@@ -79,17 +86,27 @@ class CocktailSummaryAdminForm(forms.ModelForm):
         for f in self.fields.values():
             f.required = False
 
+        # Force 2-decimal display and step on the widget
+        if "price_suggested" in self.fields:
+            self.fields["price_suggested"].widget.attrs.update({"step": "0.01"})
+            v = getattr(self.instance, "price_suggested", None)
+            if v is not None:
+                try:
+                    self.initial["price_suggested"] = f"{float(v):.2f}"
+                except Exception:
+                    pass
+
 
 @admin.register(CocktailSummary)
 class CocktailSummaryAdmin(admin.ModelAdmin):
     """
-    Summary admin remains editable. Save will NOT write to the view (which is
-    non-updatable) — instead we proxy the editable field(s) to the upstream
-    Cocktail row that actually owns them.
+    Summary admin remains editable. Save will NOT write to the view (non-updatable);
+    instead we proxy allowed fields to the upstream Cocktail row.
+    Currently proxied: glass_type.
     """
     form = CocktailSummaryAdminForm
 
-    list_display = ("name", "price_suggested", "abv_percent", "glass_type")
+    list_display = ("name", "price_suggested_2dp", "abv_percent", "glass_type")
     search_fields = ("name", "slug")
     ordering = ("name",)
 
@@ -107,13 +124,16 @@ class CocktailSummaryAdmin(admin.ModelAdmin):
         "allergens_json",
     ]
 
+    @admin.display(description="PRICE SUGGESTED")
+    def price_suggested_2dp(self, obj: CocktailSummary):
+        v = getattr(obj, "price_suggested", None)
+        return "" if v is None else f"{float(v):.2f}"
+
     def save_model(self, request, obj, form, change):
         """
-        DO NOT save CocktailSummary (it's a view).
-        Instead update the upstream Cocktail for fields we allow here.
-        Currently proxied: glass_type.
+        DO NOT save CocktailSummary (it's a DB VIEW).
+        Proxy editable field(s) to Cocktail and show a success banner.
         """
-        # Pull desired value from the form (None/"" clears it)
         glass_val = form.cleaned_data.get("glass_type", None)
 
         # Update the upstream Cocktail (same PK as summary)
@@ -124,19 +144,17 @@ class CocktailSummaryAdmin(admin.ModelAdmin):
             messages.success(request, "Glass type updated on Cocktail.")
         except Cocktail.DoesNotExist:
             messages.error(request, "Linked Cocktail not found; cannot update glass type.")
-            # fall through, but don't attempt to save the view
 
-        # NEVER call super().save_model(...) — avoids UPDATE on MySQL VIEW
+        # Never call super().save_model(...) — avoids UPDATE on VIEW
         messages.success(
             request,
-            "Saved changes to the form. Other fields on this page are read from the view and "
-            "should be edited on the Cocktail page if you need to persist them."
+            "Saved changes to the form. Values shown here come from a database view; "
+            "edit the Cocktail to persist other fields."
         )
 
     def has_add_permission(self, request):
-        # Do not allow creating rows for a view
+        # Avoid creating rows for a view
         return False
 
     def has_delete_permission(self, request, obj=None):
-        # Avoid DELETE against a view
         return False
